@@ -7,9 +7,8 @@ the cloud underneath changed.
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
-
 from fake_cosmos import FakeContainer
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture

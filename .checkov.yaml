@@ -1,0 +1,32 @@
+# Checkov config. `skip-check` is a REVIEWED baseline — each entry is an accepted
+# risk or a demonstrated false positive, with the reason. Everything else is a hard
+# gate: any new category of misconfiguration in a PR fails the build.
+directory:
+  - terraform
+# This repo's own policy-as-code alongside checkov's built-ins. Declared here, not
+# as a CI flag, so a local `checkov` run gates exactly what CI gates.
+external-checks-dir:
+  - policies
+compact: true
+quiet: true
+skip-check:
+  # FALSE POSITIVE, verified against the installed checkov source. The check reads
+  # `local_authentication_disabled`, which the azurerm provider REMOVED in v5.0 and
+  # replaced with `local_authentication_enabled`. This account sets
+  # `local_authentication_enabled = false` — keys are off, and the check cannot see it.
+  # checkov/terraform/checks/resource/azure/CosmosDBLocalAuthDisabled.py:get_inspected_key
+  - CKV_AZURE_140
+
+  # NOT FIXABLE in provider v5: `trust_policy_enabled` was removed because Azure is
+  # retiring ACR content trust. There is no ACR-native replacement, so image
+  # provenance lives in the pipeline (cosign + SLSA attestation) instead.
+  - CKV_AZURE_164
+
+  # Customer-managed keys for Cosmos — needs a Key Vault, a key, rotation and an
+  # access policy. Platform-managed encryption is on. Same trade-off (and same
+  # decision) as the AWS side's DynamoDB SSE baseline.
+  - CKV_AZURE_100
+
+  # Geo-replicated ACR — a second region's worth of storage for a single-region
+  # demo that is destroyed between runs. Cost, not security.
+  - CKV_AZURE_165

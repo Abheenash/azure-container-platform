@@ -1,0 +1,138 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_VERSION: v0.69.3
+
+jobs:
+  secrets-scan:
+    name: gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  iac-scan:
+    name: checkov + terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: checkov (reviewed baseline in .checkov.yaml)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          config_file: .checkov.yaml
+      - uses: hashicorp/setup-terraform@v3
+      - name: fmt + validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false
+          terraform validate
+
+  unit-tests:
+    name: pytest (fake Cosmos container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -r tests/requirements.txt -r app/requirements.txt
+      - run: python -m pytest tests -q
+
+  image-scan:
+    name: trivy (image + deps) + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: build image
+        run: docker build -t acp:ci .
+      # Pinned, not @main — trivy's supply chain was compromised twice in March
+      # 2026 (CVE-2026-33634). v0.69.3 predates the malicious releases.
+      - name: install trivy (pinned)
+        run: |
+          curl -sfL "https://raw.githubusercontent.com/aquasecurity/trivy/${TRIVY_VERSION}/contrib/install.sh" \
+            | sudo sh -s -- -b /usr/local/bin "${TRIVY_VERSION#v}"
+          trivy --version
+      - name: trivy image + dependency scan (HIGH/CRITICAL, fixed only)
+        run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --format table acp:ci
+      - name: trivy secret scan of the image layers
+        run: trivy image --scanners secret --exit-code 1 --format table acp:ci
+      - name: generate SBOM (CycloneDX)
+        run: trivy image --format cyclonedx --output sbom.cdx.json acp:ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+      - name: image must run as non-root
+        run: |
+          uid=$(docker run --rm --entrypoint id acp:ci -u)
+          test "$uid" = "10001" || { echo "container runs as uid $uid, expected 10001"; exit 1; }
+
+  deploy:
+    name: push to ACR + deploy (main only)
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    needs: [secrets-scan, iac-scan, unit-tests, image-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # OIDC → Azure workload identity federation, and Sigstore
+      attestations: write  # required by actions/attest-*
+    steps:
+      - uses: actions/checkout@v7
+
+      # Keyless: GitHub's OIDC token is exchanged for an Azure token via the
+      # federated credential in terraform/identity.tf. No client secret exists.
+      - name: Azure login (federated, no secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: build and push to ACR
+        id: push
+        env:
+          REGISTRY: ${{ vars.ACR_LOGIN_SERVER }}
+        run: |
+          az acr login --name "${REGISTRY%%.*}"
+          IMAGE="$REGISTRY/acp:${GITHUB_SHA::12}"
+          docker build --platform linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          DIGEST_REF=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST_REF" >> "$GITHUB_OUTPUT"
+          echo "digest_only=${DIGEST_REF#*@}" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+      - name: sign the image by digest (keyless)
+        run: cosign sign --yes "${{ steps.push.outputs.digest }}"
+
+      # ACR content trust is being retired and has no replacement, so provenance
+      # is entirely the pipeline's job here — more load-bearing than on AWS.
+      - name: attest build provenance (SLSA, in-toto)
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ vars.ACR_LOGIN_SERVER }}/acp
+          subject-digest: ${{ steps.push.outputs.digest_only }}
+          push-to-registry: true
+
+      - name: roll the container app to the new image
+        run: |
+          az containerapp update \
+            --name "${{ vars.CONTAINER_APP_NAME }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP }}" \
+            --image "${{ steps.push.outputs.image }}" \
+            --query "properties.provisioningState"

@@ -6,4 +6,4 @@ azure-identity==1.25.3
 pydantic==2.13.5
 # Pinned above the transitive version the cloud SDK pulls in:
 # GHSA-6v7p-g79w-8964 is an out-of-bounds read, fixed in 1.2.1.
-msgpack>=1.2.1
+msgpack>=1.2.2

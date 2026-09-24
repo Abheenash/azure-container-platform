@@ -1,5 +1,15 @@
 # Azure Container Platform — the same service as my AWS one, built again on Azure
 
+> **Sep 2026 (v2):** the API test suite now also runs against **Microsoft's Linux Cosmos
+> emulator**, alongside the hand-written fake — free, no Azure subscription. Unlike the AWS
+> and GCP ports this one injects the client rather than configuring an endpoint, and the
+> reason is deliberate: the emulator authenticates with a key, and adding a key path to
+> `app/main.py` would put the exact thing this repo argues against into production code.
+> The trade-off is stated in the suite's docstring — client construction and managed-identity
+> auth stay covered by Terraform and checkov, everything downstream of the container handle
+> is now exercised against the real engine. CI sets `REQUIRE_COSMOS=1` so an emulator that
+> fails to start errors instead of skipping six tests behind a green tick.
+>
 > **Sep 2026:** first release — Container Apps + Cosmos DB (serverless) + ACR, managed identity end to end (no keys, no connection strings), keyless CI via workload identity federation, 13 checkov checks and 15 tests green, `terraform validate` clean. Deliberately not applied.
 
 A deliberate port of [`secure-container-pipeline`](https://github.com/Abheenash/secure-container-pipeline)

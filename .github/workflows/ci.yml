@@ -48,14 +48,39 @@ jobs:
           terraform validate
 
   unit-tests:
-    name: pytest (fake Cosmos container)
+    name: pytest (fake container + real Cosmos emulator)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - run: pip install -r tests/requirements.txt -r app/requirements.txt
+
+      # Microsoft's Linux Cosmos emulator — the real engine and the real SQL
+      # grammar, free and subscription-free. The vnext-preview image serves the
+      # gateway over plain HTTP, which is what makes this usable in CI at all:
+      # the older emulator required trusting a self-signed certificate first.
+      - name: start the Cosmos emulator
+        run: |
+          docker run -d --name cosmos-emulator -p 8081:8081 \
+            mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+          for _ in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/ || true)
+            if [ "$code" = "200" ]; then echo "emulator is up"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::the Cosmos emulator never became reachable"
+          docker logs cosmos-emulator; exit 1
+
+      # REQUIRE_COSMOS=1 makes a missing emulator an error rather than six quiet
+      # skips behind a green tick.
       - run: python -m pytest tests -q
+        env:
+          COSMOS_EMULATOR_URL: http://127.0.0.1:8081
+          REQUIRE_COSMOS: "1"
+
+      - if: always()
+        run: docker rm -f cosmos-emulator || true
 
   image-scan:
     name: trivy (image + deps) + SBOM
